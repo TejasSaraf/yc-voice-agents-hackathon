@@ -15,6 +15,13 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=bind,source=pyproject.toml,target=pyproject.toml \
     uv sync --locked --no-install-project --no-dev
 
-# Copy the application code
-COPY ./bot.py bot.py
-COPY ./mock_backend.py mock_backend.py
+# Copy the application code.
+# bot-freightvoice.py (Nemotron pipeline) is the deploy entrypoint, copied to
+# the conventional bot.py name. Its GPT/Gradium fallback and shared modules
+# ship alongside it.
+COPY ./bot-freightvoice.py bot.py
+COPY ./bot-freightvoice-gpt.py bot-freightvoice-gpt.py
+COPY ./freight_backend.py freight_backend.py
+COPY ./freight_scenarios.py freight_scenarios.py
+COPY ./nemotron_llm.py nemotron_llm.py
+COPY ./nvidia_stt.py nvidia_stt.py
