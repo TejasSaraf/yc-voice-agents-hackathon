@@ -215,6 +215,39 @@ This spins up anything from 10–20 evaluators (what Cekura calls test cases), r
 
 > When connecting your agent, **select `Pipecat` as the provider.** Details: [docs.cekura.ai → Pipecat](https://docs.cekura.ai/documentation/integrations/pipecat/automated).
 
+### FreightVoice's built-in eval, observability & self-improve loop
+
+FreightVoice wires Cekura in directly so the agent gets better after every call.
+All of it is **optional** — set `CEKURA_API_KEY` + `CEKURA_AGENT_ID` in
+`server/.env` to enable the cloud features; everything also runs fully local
+without them.
+
+| Capability | Where | What it does |
+|---|---|---|
+| **Observability (after each call)** | `server/post_call.py` + `server/call_recorder.py` | On every call end, captures the transcript (from the LLM context) + per-turn TTFB latency, writes a record to `server/.call_logs/`, and ships it to Cekura's `observability/v1/observe/` endpoint. |
+| **Evaluate with test cases** | `server/eval_agent.py` | Drives the real Nemotron LLM through scripted driver personas (late-in-rain, on-time, frustrated-breakdown), scoring sentiment, tool calls, alert correctness, and LLM latency. `--cekura` triggers Cekura cloud scenarios instead. |
+| **Self-improve** | `server/self_improve.py` | Calls Cekura's `call-logs/improve_prompt/` to propose system-prompt fixes from real calls. Falls back to a local diagnosis (latency outliers, missed alerts, echo detection) with no Cekura account. |
+| **Latency** | `bot-freightvoice.py` | Speaks a deterministic opening line via TTS the instant the driver answers (skips the ~2s opening LLM call); `FREIGHTVOICE_INSTANT_GREETING` / `NEMOTRON_ENABLE_THINKING` knobs, measurable via the eval harness. |
+
+```bash
+cd server
+
+# 1. Regression-test the agent against scripted personas (+ latency report)
+uv run eval_agent.py
+uv run eval_agent.py --persona late_rain          # one case
+NEMOTRON_ENABLE_THINKING=false uv run eval_agent.py  # A/B latency
+
+# 2. Place real calls (dashboard / phone) — each one auto-logs to
+#    server/.call_logs/ and (if configured) to Cekura observability.
+
+# 3. Turn those calls into improvements
+uv run self_improve.py            # Cekura prompt rewrite if configured, else local diagnosis
+uv run self_improve.py --local    # force local analysis
+
+# 4. Run Cekura cloud scenarios against the live agent
+uv run eval_agent.py --cekura --scenario-ids 30,31
+```
+
 ## Learn more
 
 ### Pipecat

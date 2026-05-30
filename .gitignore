@@ -223,3 +223,35 @@ __marimo__/
 # Local reference checkout of pipecat source (read-only; runtime uses the
 # installed pipecat-ai package). It's a separate 182MB embedded git repo.
 pipecat-core-code/
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Local env override files (in addition to .env above)
+.env.local
+.env.*.local
+# Any other dotenv variant (e.g. .env.production, .env.staging, .env.example)
+.env.*
+
+# uv lockfile (excluded by request)
+uv.lock
+
+# Secrets / credentials (never push)
+*.pem
+*.key
+*.p12
+*credentials.json
+credentials.json
+service-account*.json
+secrets.json
+*.token
+
+# FreightVoice live-call state (persisted across uvicorn --reload restarts)
+server/.live_calls.json
+server/.live_calls.json.tmp
+
+# FreightVoice post-call records + evaluation outputs (Cekura / self-improve)
+server/.call_logs/
+server/.eval_results/

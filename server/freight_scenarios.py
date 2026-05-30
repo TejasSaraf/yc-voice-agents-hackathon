@@ -10,14 +10,113 @@ Scenarios (selected via FREIGHTVOICE_SCENARIO):
   * compliance  — Problem 3: multilingual supplier compliance
 """
 
+import asyncio
+import dataclasses
 import os
+from datetime import datetime
+from enum import Enum
 
+import aiohttp
 from loguru import logger
 from pipecat.frames.frames import EndTaskFrame, FunctionCallResultProperties
 from pipecat.processors.frame_processor import FrameDirection
 from pipecat.services.llm_service import FunctionCallParams
 
-from freight_backend import SHIPMENTS, SUPPLIERS, score_risk
+from freight_backend import SHIPMENTS, SUPPLIERS
+from risk_scorer import RiskLevel, compute_risk_score, fetch_weather_risk
+
+# ---------------------------------------------------------------------------
+# Dashboard live-update helper
+# ---------------------------------------------------------------------------
+
+_DASHBOARD_API_URL = os.getenv("DASHBOARD_API_URL", "http://localhost:8000").rstrip("/")
+
+# Most-recent carrier call_state, set when a scenario is built. The bot reads
+# this in its post-call finalize hook to enrich the call record.
+_LAST_CALL_STATE: dict | None = None
+
+# Deterministic spoken opening line for the most recent carrier scenario, used
+# by the bot to greet instantly via TTS (skipping the first LLM round-trip).
+_LAST_OPENING_LINE: str | None = None
+
+
+def _jsonable(value):
+    """Recursively convert dataclasses (RiskResult, SignalBreakdown) and enums
+    (RiskLevel) into plain JSON-serializable types. The risk result is stored as
+    a live dataclass in call_state, so it must be flattened before the call
+    record is persisted or shipped to Cekura (otherwise json.dumps raises
+    'Object of type RiskResult is not JSON serializable')."""
+    if dataclasses.is_dataclass(value) and not isinstance(value, type):
+        return {k: _jsonable(v) for k, v in dataclasses.asdict(value).items()}
+    if isinstance(value, Enum):
+        return value.value
+    if isinstance(value, dict):
+        return {k: _jsonable(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_jsonable(v) for v in value]
+    return value
+
+
+def get_last_call_state() -> dict:
+    """Return a JSON-safe copy of the most recent call's scenario state.
+
+    The raw ``risk_result`` is a ``RiskResult`` dataclass; we flatten it (and
+    add the derived ``must_alert`` flag the eval/self-improve tooling reads) so
+    the whole state can be persisted and observed without serialization errors.
+    """
+    if not _LAST_CALL_STATE:
+        return {}
+    state = _jsonable(dict(_LAST_CALL_STATE))
+    risk = state.get("risk_result")
+    if isinstance(risk, dict) and "level" in risk:
+        risk["must_alert"] = risk.get("level") in ("WARNING", "CRITICAL")
+    return state
+
+
+def get_opening_line() -> str | None:
+    """Return the deterministic spoken opening for the most recent scenario."""
+    return _LAST_OPENING_LINE
+
+
+async def _push_call_update(load_id: str, update: dict) -> None:
+    """Fire-and-forget POST of the current call state to the dashboard.
+
+    Hard-capped at 1.5s so a slow API server never stalls the voice pipeline.
+    Failures are logged at DEBUG only — the bot keeps talking even if the
+    dashboard is offline.
+    """
+    payload = {"load_id": load_id, "ts": datetime.now().isoformat(), **update}
+    url = f"{_DASHBOARD_API_URL}/api/calls/update"
+    try:
+        timeout = aiohttp.ClientTimeout(total=1.5)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.post(url, json=payload) as resp:
+                if resp.status >= 400:
+                    body = await resp.text()
+                    logger.warning(
+                        f"Dashboard update {resp.status} for {load_id}: {body[:200]}"
+                    )
+    except Exception as exc:
+        logger.debug(f"Dashboard update suppressed for {load_id}: {exc}")
+
+
+def _fire_update(load_id: str, update: dict) -> None:
+    """Schedule _push_call_update without awaiting — never blocks the LLM."""
+    asyncio.create_task(_push_call_update(load_id, update))
+
+
+def _appointment_minutes_from_now(appointment: str) -> int | None:
+    """Parse an appointment string like '8:00 AM' into minutes from now."""
+    for fmt in ("%I:%M %p", "%I %p"):
+        try:
+            appt = datetime.strptime(appointment, fmt)
+            now = datetime.now()
+            appt = appt.replace(year=now.year, month=now.month, day=now.day)
+            return int((appt - now).total_seconds() / 60)
+        except ValueError:
+            continue
+    logger.warning(f"Could not parse appointment time '{appointment}'")
+    return None
 
 
 def build_carrier_checkin(load_id: str) -> tuple[list, str, str]:
@@ -32,39 +131,60 @@ def build_carrier_checkin(load_id: str) -> tuple[list, str, str]:
     call_state: dict = {
         "current_location": None,
         "eta": None,
-        "driver_confident": True,
-        "eta_minutes_late": 0,
+        "driver_sentiment": "calm",
+        "eta_minutes_from_now": None,
         "cargo_ok": None,
         "dock_notified": False,
-        "risk": None,
+        "risk_result": None,
         "logistics_alerted": False,
     }
+    # Expose this call's mutable state so the bot can attach it to the post-call
+    # record (for Cekura metadata + local self-improve analysis).
+    global _LAST_CALL_STATE
+    _LAST_CALL_STATE = call_state
 
     async def confirm_eta(
         params: FunctionCallParams,
         current_location: str,
         eta: str,
-        driver_sounded_confident: bool = True,
-        minutes_late_vs_appointment: int = 0,
+        driver_sentiment: str = "calm",
+        eta_minutes_from_now: int | None = None,
     ) -> None:
-        """Record the driver's current location and ETA. Call this as soon as
-        the driver tells you where they are and when they expect to arrive.
+        """Record the driver's current location, ETA, and tone. Call this as
+        soon as the driver tells you where they are and when they expect to
+        arrive.
 
         Args:
-            current_location: Where the driver says they are now, in their words
-                (e.g. "in Reno", "about 20 out on the 94").
+            current_location: Where the driver says they are now, in their
+                words (e.g. "in Reno", "about 20 out on the 94").
             eta: The arrival time the driver gives, in their words
                 (e.g. "7:30", "about 20 minutes out").
-            driver_sounded_confident: False if the driver hedged, sounded unsure,
-                or gave a vague/uncertain answer about timing. This feeds the
-                risk score, so be honest about how confident they sounded.
-            minutes_late_vs_appointment: Rough minutes the ETA is BEHIND the
-                scheduled dock appointment. 0 if on time or early.
+            driver_sentiment: Your honest read of the driver's tone.
+                Must be exactly one of: "confident", "calm", "uncertain",
+                "frustrated". This is the highest-weighted signal in the risk
+                model — be precise.
+                  "confident"  → clear, specific, no hedging
+                  "calm"       → relaxed, on track, no concerns raised
+                  "uncertain"  → hedging, vague timing, mentions problems
+                  "frustrated" → stressed, complaining, evasive about timing
+            eta_minutes_from_now: Your best estimate of how many minutes until
+                the driver arrives, based on what they said. Convert verbal
+                cues — "about 20 out" → 20, "7:30" and it's 6:45 → 45.
+                Leave None if the driver gave genuinely no usable number.
         """
         call_state["current_location"] = current_location
         call_state["eta"] = eta
-        call_state["driver_confident"] = driver_sounded_confident
-        call_state["eta_minutes_late"] = max(0, minutes_late_vs_appointment)
+        call_state["driver_sentiment"] = driver_sentiment
+        call_state["eta_minutes_from_now"] = eta_minutes_from_now
+
+        _fire_update(load_id, {
+            "stage": "eta_confirmed",
+            "current_location": current_location,
+            "eta_text": eta,
+            "eta_minutes_from_now": eta_minutes_from_now,
+            "driver_sentiment": driver_sentiment,
+        })
+
         await params.result_callback(
             {
                 "ok": True,
@@ -72,6 +192,7 @@ def build_carrier_checkin(load_id: str) -> tuple[list, str, str]:
                 "commodity": shipment["commodity"],
                 "scheduled_appointment": shipment["appointment"],
                 "recorded_eta": eta,
+                "recorded_sentiment": driver_sentiment,
                 "next": "Verify cargo condition, then assign the dock and assess risk.",
             }
         )
@@ -97,6 +218,14 @@ def build_carrier_checkin(load_id: str) -> tuple[list, str, str]:
         if shipment["requires_temp_control"] and not temp_verified:
             problems.append(f"temperature NOT verified (requires {shipment['temp_range']})")
         call_state["cargo_ok"] = not problems
+
+        _fire_update(load_id, {
+            "stage": "cargo_verified",
+            "cargo_ok": not problems,
+            "cargo_problems": problems or None,
+            "seal_number": seal_number,
+        })
+
         await params.result_callback(
             {
                 "ok": not problems,
@@ -112,6 +241,12 @@ def build_carrier_checkin(load_id: str) -> tuple[list, str, str]:
         check in. Call this once ETA is confirmed so receiving is ready before
         the truck arrives (proactive dock coordination)."""
         call_state["dock_notified"] = True
+        _fire_update(load_id, {
+            "stage": "dock_assigned",
+            "dock_notified": True,
+            "dock": shipment["dock"],
+            "gate": shipment["gate"],
+        })
         await params.result_callback(
             {
                 "ok": True,
@@ -126,25 +261,58 @@ def build_carrier_checkin(load_id: str) -> tuple[list, str, str]:
         )
 
     async def assess_risk(params: FunctionCallParams) -> None:
-        """Score the risk this shipment poses to the production line, using the
-        carrier's on-time history, route weather, the driver's HOS clock, how
-        confident the driver sounded, and any reported lateness. Call this after
-        confirming ETA. If the result is medium or high risk, you MUST then call
+        """Score the risk this shipment poses to the production line using the
+        FreightVoice predictive model (voice sentiment + historical OTD + time
+        pressure + NOAA weather + ETA vagueness). Call this after confirming
+        ETA. If the result is WARNING or CRITICAL, you MUST then call
         alert_logistics_team."""
-        risk = score_risk(
-            shipment,
-            driver_confident=call_state["driver_confident"],
-            eta_minutes_late=call_state["eta_minutes_late"],
+        weather_risk = await fetch_weather_risk(shipment["lane"])
+        deadline_minutes = _appointment_minutes_from_now(shipment["appointment"])
+
+        result = compute_risk_score(
+            sentiment=call_state["driver_sentiment"],
+            historical_otd_rate=shipment["lane_on_time_rate"],
+            eta_minutes_from_now=call_state["eta_minutes_from_now"],
+            deadline_minutes_from_now=deadline_minutes,
+            weather_risk=weather_risk,
+            hourly_downtime_cost=shipment["hourly_downtime_cost"],
+            production_line=shipment["production_line"],
+            load_id=load_id,
         )
-        call_state["risk"] = risk
+        call_state["risk_result"] = result
+
+        signal_summary = {
+            name: {
+                "label": s.label,
+                "contribution": s.contribution,
+                "weight": s.weight,
+            }
+            for name, s in result.signals.items()
+        }
+
+        _fire_update(load_id, {
+            "stage": "risk_assessed",
+            "live_risk": {
+                "score": result.score,
+                "level": result.level.value,
+                "raw":   result.raw_score,
+                "signals": signal_summary,
+                "recommended_action": result.recommended_action,
+                "next_checkin_minutes": result.next_checkin_minutes,
+            },
+        })
+
         await params.result_callback(
             {
                 "load_id": load_id,
                 "production_line": shipment["production_line"],
-                "risk_level": risk["level"],
-                "risk_score": risk["score"],
-                "factors": risk["factors"],
-                "recommended_action": risk["recommended_action"],
+                "risk_score": result.score,
+                "risk_level": result.level.value,
+                "raw_score": result.raw_score,
+                "signals": signal_summary,
+                "recommended_action": result.recommended_action,
+                "next_checkin_minutes": result.next_checkin_minutes,
+                "must_alert": result.level in (RiskLevel.WARNING, RiskLevel.CRITICAL),
             }
         )
 
@@ -153,7 +321,7 @@ def build_carrier_checkin(load_id: str) -> tuple[list, str, str]:
         recommended_action: str,
     ) -> None:
         """Fire an alert to the shipper's logistics team. Call this ONLY when
-        assess_risk returned medium or high risk — the whole point is that the
+        assess_risk returned WARNING or CRITICAL — the whole point is that the
         team handles exceptions, not every routine on-time arrival.
 
         Args:
@@ -161,9 +329,18 @@ def build_carrier_checkin(load_id: str) -> tuple[list, str, str]:
                 an alternate carrier, pre-stage stock, adjust the schedule, etc.).
         """
         call_state["logistics_alerted"] = True
-        risk = call_state.get("risk") or {}
+        result = call_state.get("risk_result")
+        score = result.score if result else "?"
+        level = result.level.value if result else "?"
+
+        _fire_update(load_id, {
+            "stage": "alerted",
+            "logistics_alerted": True,
+            "alert_action": recommended_action,
+        })
+
         logger.info(
-            f"🚨 LOGISTICS ALERT {load_id} [{risk.get('level')}] "
+            f"🚨 LOGISTICS ALERT {load_id} [{level}] score={score} "
             f"{shipment['production_line']} :: {recommended_action}"
         )
         await params.result_callback(
@@ -171,9 +348,10 @@ def build_carrier_checkin(load_id: str) -> tuple[list, str, str]:
                 "ok": True,
                 "alerted": shipment["shipper"],
                 "production_line": shipment["production_line"],
-                "risk_level": risk.get("level"),
+                "risk_score": score,
+                "risk_level": level,
                 "recommended_action": recommended_action,
-                "note": "Logistics team notified. You do NOT need to read this alert to the driver.",
+                "note": "Logistics team notified. You do NOT need to read the score or alert text to the driver.",
             }
         )
 
@@ -181,6 +359,16 @@ def build_carrier_checkin(load_id: str) -> tuple[list, str, str]:
         """End the call. Only call this AFTER you have said goodbye to the driver
         in the same turn. The pipeline flushes queued speech and then hangs up."""
         logger.info(f"end_call invoked for {load_id} — final state: {call_state}")
+        # IMPORTANT: await this push (don't fire-and-forget). The very next line
+        # tears down the pipeline via EndTaskFrame, which cancels any pending
+        # asyncio tasks — so a fire-and-forget _fire_update here would be killed
+        # before the POST lands, and the dashboard would never see the call
+        # complete (live strip stuck "in progress", modal never closes).
+        # _push_call_update is hard-capped at 1.5s and swallows errors.
+        await _push_call_update(load_id, {
+            "stage": "completed",
+            "completed_at": datetime.now().isoformat(),
+        })
         await params.llm.push_frame(EndTaskFrame(), FrameDirection.UPSTREAM)
         await params.result_callback(
             {"ok": True}, properties=FunctionCallResultProperties(run_llm=False)
@@ -207,14 +395,23 @@ def build_carrier_checkin(load_id: str) -> tuple[list, str, str]:
         f"{shipment['dock']} at {shipment['appointment']}. This part feeds "
         f"{shipment['production_line']} — if it's late, the line is at risk.\n\n"
         "YOUR JOB on this call, in order:\n"
-        "1. Confirm the driver's current location and ETA. Call confirm_eta. Pay attention "
-        "to whether they sound confident or hedge — that matters.\n"
+        "1. Confirm the driver's current location and ETA. Call confirm_eta with:\n"
+        "   - driver_sentiment: your honest read of the driver's tone — exactly one of\n"
+        "     \"confident\" (clear, specific, no hedging),\n"
+        "     \"calm\" (relaxed, on track),\n"
+        "     \"uncertain\" (hedging, vague, mentions problems),\n"
+        "     \"frustrated\" (stressed, complaining, evasive).\n"
+        "     This is the highest-weighted signal in the risk model. Be precise.\n"
+        "   - eta_minutes_from_now: convert what the driver said to a minute count\n"
+        "     (\"about 20 out\" → 20, \"seven thirty\" and it's 6:45 now → 45).\n"
+        "     Use None only if they gave genuinely no usable number.\n"
         f"2. Verify the load is {cargo_line}. Call verify_cargo_condition.\n"
         "3. Proactively prep receiving: call assign_dock, then tell the driver the dock and "
         "which gate to check in at.\n"
-        "4. Call assess_risk to score the risk to the production line. If it comes back "
-        "medium or high, call alert_logistics_team with the recommended action. Do NOT "
-        "alarm the driver — the alert goes to the shipper's team, not to them.\n"
+        "4. Call assess_risk — it runs the predictive model and scores the risk to the "
+        "production line. If it returns must_alert=true (WARNING or CRITICAL), call "
+        "alert_logistics_team with the recommended action. Do NOT alarm the driver — "
+        "the alert goes to the shipper's team, not to them.\n"
         "5. Give a short, warm sign-off confirming the team has been notified, then call "
         "end_call in the same turn.\n\n"
         "HOW TO TALK — you're a real dispatcher on the phone, not a chatbot:\n"
@@ -223,8 +420,8 @@ def build_carrier_checkin(load_id: str) -> tuple[list, str, str]:
         "\"I'd be happy to.\" Go straight to the point.\n"
         "- Use contractions. Fragments are fine. Read times in words "
         "(\"seven thirty\", not \"7:30\").\n"
-        "- Responses are spoken aloud. No bullet points, no emojis, no reading out tool names "
-        "or JSON. Never read the internal risk score or alert text to the driver.\n\n"
+        "- Responses are spoken aloud. No bullet points, no emojis, no reading out tool names, "
+        "JSON, or risk scores. Never read internal scores or alert text to the driver.\n\n"
         "Open the call by identifying yourself and the shipper, stating the scheduled "
         "delivery, and asking the driver to confirm their ETA and current location — "
         "like: \"Hi, this is FreightVoice calling on behalf of "
@@ -238,6 +435,16 @@ def build_carrier_checkin(load_id: str) -> tuple[list, str, str]:
         f"yourself and {shipment['shipper']}, state the scheduled delivery of "
         f"{shipment['commodity']} to {shipment['dock']} at {shipment['appointment']}, and "
         "ask the driver to confirm their ETA and current location."
+    )
+
+    # Deterministic spoken opening — lets the bot greet INSTANTLY via TTS instead
+    # of waiting ~2s for the LLM to generate the first turn (big perceived-latency
+    # win right after the driver picks up). Matches the example in the prompt.
+    global _LAST_OPENING_LINE
+    _LAST_OPENING_LINE = (
+        f"Hi, this is FreightVoice calling on behalf of {shipment['shipper']}. "
+        f"You're scheduled to deliver {shipment['commodity']} to {shipment['dock']} "
+        f"at {shipment['appointment']}. Can you confirm your ETA and current location?"
     )
 
     return tool_functions, system_instruction, greeting
@@ -425,23 +632,33 @@ def build_supplier_compliance(supplier_id: str) -> tuple[list, str, str]:
     return tool_functions, system_instruction, greeting
 
 
-def build_scenario() -> tuple[list, str, str]:
-    """Select and build the active scenario from environment variables.
+def build_scenario(
+    *,
+    scenario: str | None = None,
+    load_id: str | None = None,
+    supplier_id: str | None = None,
+) -> tuple[list, str, str]:
+    """Select and build the active scenario.
 
-    FREIGHTVOICE_SCENARIO=carrier (default) | compliance
-    FREIGHTVOICE_LOAD_ID / FREIGHTVOICE_SUPPLIER_ID pin the demo target.
+    Per-call overrides take precedence over the environment defaults, falling
+    back to env (then a hard default). This lets a dashboard-triggered call name
+    its own load via the call's WebSocket body, while a bare ``uv run
+    bot-freightvoice.py`` still works off ``.env``:
+
+        FREIGHTVOICE_SCENARIO=carrier (default) | compliance
+        FREIGHTVOICE_LOAD_ID / FREIGHTVOICE_SUPPLIER_ID pin the demo target.
     """
-    scenario = os.getenv("FREIGHTVOICE_SCENARIO", "carrier").strip().lower()
+    scenario = (scenario or os.getenv("FREIGHTVOICE_SCENARIO", "carrier")).strip().lower()
 
     if scenario == "compliance":
-        supplier_id = os.getenv("FREIGHTVOICE_SUPPLIER_ID", "APPL-CAM-221").upper()
+        supplier_id = (supplier_id or os.getenv("FREIGHTVOICE_SUPPLIER_ID", "APPL-CAM-221")).upper()
         if supplier_id not in SUPPLIERS:
             logger.warning(f"Unknown supplier {supplier_id}, defaulting to APPL-CAM-221")
             supplier_id = "APPL-CAM-221"
         logger.info(f"Scenario: supplier compliance ({supplier_id})")
         return build_supplier_compliance(supplier_id)
 
-    load_id = os.getenv("FREIGHTVOICE_LOAD_ID", "TSLA-BAT-0412").upper()
+    load_id = (load_id or os.getenv("FREIGHTVOICE_LOAD_ID", "TSLA-BAT-0412")).upper()
     if load_id not in SHIPMENTS:
         logger.warning(f"Unknown load {load_id}, defaulting to TSLA-BAT-0412")
         load_id = "TSLA-BAT-0412"

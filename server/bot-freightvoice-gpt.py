@@ -20,6 +20,7 @@ from dotenv import load_dotenv
 from loguru import logger
 from pipecat.adapters.schemas.tools_schema import ToolsSchema
 from pipecat.audio.vad.silero import SileroVADAnalyzer
+from pipecat.audio.vad.vad_analyzer import VADParams
 from pipecat.frames.frames import LLMRunFrame
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.worker import PipelineParams, PipelineWorker
@@ -43,7 +44,11 @@ from pipecat.transports.base_transport import BaseTransport, TransportParams
 from pipecat.transports.smallwebrtc.connection import SmallWebRTCConnection
 from pipecat.transports.smallwebrtc.transport import SmallWebRTCTransport
 from pipecat.transports.websocket.fastapi import FastAPIWebsocketParams, FastAPIWebsocketTransport
-from pipecat.turns.user_turn_strategies import FilterIncompleteUserTurnStrategies
+from pipecat.turns.user_mute.always_user_mute_strategy import AlwaysUserMuteStrategy
+from pipecat.turns.user_stop.speech_timeout_user_turn_stop_strategy import (
+    SpeechTimeoutUserTurnStopStrategy,
+)
+from pipecat.turns.user_turn_strategies import UserTurnStrategies
 from pipecat.workers.runner import WorkerRunner
 
 from freight_scenarios import build_scenario
@@ -85,11 +90,22 @@ async def run_bot(
     from_number: str | None = None,
     audio_in_sample_rate: int = 16000,
     audio_out_sample_rate: int = 24000,
+    scenario_name: str | None = None,
+    load_id_override: str | None = None,
+    supplier_id_override: str | None = None,
 ):
-    """Main bot logic."""
+    """Main bot logic.
+
+    Per-call scenario context (load/scenario from the WebSocket body) overrides
+    the FREIGHTVOICE_* env defaults so each call is about the dialed load.
+    """
     logger.info("Starting FreightVoice bot (GPT/Gradium fallback)")
 
-    tool_functions, system_instruction, greeting = build_scenario()
+    tool_functions, system_instruction, greeting = build_scenario(
+        scenario=scenario_name,
+        load_id=load_id_override,
+        supplier_id=supplier_id_override,
+    )
     tools = ToolsSchema(standard_tools=tool_functions)
 
     # Speech-to-Text — Gradium (dedicated, not the shared NVIDIA ASR endpoint).
@@ -121,11 +137,31 @@ async def run_bot(
         llm.register_direct_function(fn)
 
     context = LLMContext(tools=tools)
+
+    # VAD tuned for 8kHz telephony audio — see bot-freightvoice.py for the full
+    # rationale. Echo is handled by AlwaysUserMuteStrategy, so VAD can stay
+    # sensitive enough to detect real (quieter) phone speech. stop_secs=0.2
+    # matches the value SpeechTimeoutUserTurnStopStrategy assumes.
+    phone_vad = SileroVADAnalyzer(
+        params=VADParams(
+            confidence=0.6,
+            min_volume=0.5,
+            start_secs=0.2,
+            stop_secs=0.2,
+        )
+    )
+
+    # See bot-freightvoice.py for the full rationale on these phone-call turn
+    # settings: SpeechTimeout stop strategy (no flaky SmartTurn on 8kHz audio)
+    # + AlwaysUserMuteStrategy to kill speakerphone echo while the bot speaks.
     user_aggregator, assistant_aggregator = LLMContextAggregatorPair(
         context,
         user_params=LLMUserAggregatorParams(
-            vad_analyzer=SileroVADAnalyzer(),
-            user_turn_strategies=FilterIncompleteUserTurnStrategies(),
+            vad_analyzer=phone_vad,
+            user_turn_strategies=UserTurnStrategies(
+                stop=[SpeechTimeoutUserTurnStopStrategy(user_speech_timeout=0.3)]
+            ),
+            user_mute_strategies=[AlwaysUserMuteStrategy()],
         ),
     )
 
@@ -172,6 +208,9 @@ async def bot(runner_args: RunnerArguments):
 
     from_number: str | None = None
     transport_overrides: dict = {}
+    scenario_name: str | None = None
+    load_id_override: str | None = None
+    supplier_id_override: str | None = None
 
     if os.environ.get("ENV") != "local":
         from pipecat.audio.filters.krisp_viva_filter import KrispVivaFilter
@@ -196,6 +235,10 @@ async def bot(runner_args: RunnerArguments):
             transport_overrides["audio_out_sample_rate"] = 8000
 
             _, call_data = await parse_telephony_websocket(runner_args.websocket)
+            body = call_data.get("body") or {}
+            load_id_override = body.get("load") or body.get("FREIGHTVOICE_LOAD_ID")
+            scenario_name = body.get("scenario") or body.get("FREIGHTVOICE_SCENARIO")
+            supplier_id_override = body.get("supplier") or body.get("FREIGHTVOICE_SUPPLIER_ID")
             call_info = await get_call_info(call_data["call_id"])
             if call_info:
                 from_number = call_info.get("from_number")
@@ -222,7 +265,14 @@ async def bot(runner_args: RunnerArguments):
             logger.error(f"Unsupported runner arguments type: {type(runner_args)}")
             return
 
-    await run_bot(transport, from_number=from_number, **transport_overrides)
+    await run_bot(
+        transport,
+        from_number=from_number,
+        scenario_name=scenario_name,
+        load_id_override=load_id_override,
+        supplier_id_override=supplier_id_override,
+        **transport_overrides,
+    )
 
 
 if __name__ == "__main__":
