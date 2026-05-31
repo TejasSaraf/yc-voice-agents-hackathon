@@ -22,6 +22,7 @@ from pipecat.frames.frames import EndTaskFrame, FunctionCallResultProperties
 from pipecat.processors.frame_processor import FrameDirection
 from pipecat.services.llm_service import FunctionCallParams
 
+import prompt_store
 from freight_backend import SHIPMENTS, SUPPLIERS
 from risk_scorer import RiskLevel, compute_risk_score, fetch_weather_risk
 
@@ -117,6 +118,26 @@ def _appointment_minutes_from_now(appointment: str) -> int | None:
             continue
     logger.warning(f"Could not parse appointment time '{appointment}'")
     return None
+
+
+def _carrier_fields(load_id: str) -> dict:
+    """Load-specific facts the carrier system-prompt template is rendered with."""
+    shipment = SHIPMENTS[load_id]
+    cargo_line = "sealed" + (
+        " and temperature-controlled" if shipment["requires_temp_control"] else ""
+    )
+    return {
+        "shipper": shipment["shipper"],
+        "driver_name": shipment["driver_name"],
+        "carrier": shipment["carrier"],
+        "load_id": load_id,
+        "commodity": shipment["commodity"],
+        "origin": shipment["origin"],
+        "dock": shipment["dock"],
+        "appointment": shipment["appointment"],
+        "production_line": shipment["production_line"],
+        "cargo_line": cargo_line,
+    }
 
 
 def build_carrier_checkin(load_id: str) -> tuple[list, str, str]:
@@ -355,7 +376,7 @@ def build_carrier_checkin(load_id: str) -> tuple[list, str, str]:
             }
         )
 
-    async def end_call(params: FunctionCallParams) -> None:
+    async def end_call(params: FunctionCallParams, call_id: str | None = None) -> None:
         """End the call. Only call this AFTER you have said goodbye to the driver
         in the same turn. The pipeline flushes queued speech and then hangs up."""
         logger.info(f"end_call invoked for {load_id} — final state: {call_state}")
@@ -383,52 +404,10 @@ def build_carrier_checkin(load_id: str) -> tuple[list, str, str]:
         end_call,
     ]
 
-    cargo_line = "sealed" + (
-        " and temperature-controlled" if shipment["requires_temp_control"] else ""
-    )
-
-    system_instruction = (
-        f"You are FreightVoice, an inbound-logistics coordinator calling on behalf of "
-        f"{shipment['shipper']}. You are making an OUTBOUND call to {shipment['driver_name']}, "
-        f"the driver for {shipment['carrier']}, about load {load_id}: "
-        f"{shipment['commodity']} from {shipment['origin']}, scheduled to deliver to "
-        f"{shipment['dock']} at {shipment['appointment']}. This part feeds "
-        f"{shipment['production_line']} — if it's late, the line is at risk.\n\n"
-        "YOUR JOB on this call, in order:\n"
-        "1. Confirm the driver's current location and ETA. Call confirm_eta with:\n"
-        "   - driver_sentiment: your honest read of the driver's tone — exactly one of\n"
-        "     \"confident\" (clear, specific, no hedging),\n"
-        "     \"calm\" (relaxed, on track),\n"
-        "     \"uncertain\" (hedging, vague, mentions problems),\n"
-        "     \"frustrated\" (stressed, complaining, evasive).\n"
-        "     This is the highest-weighted signal in the risk model. Be precise.\n"
-        "   - eta_minutes_from_now: convert what the driver said to a minute count\n"
-        "     (\"about 20 out\" → 20, \"seven thirty\" and it's 6:45 now → 45).\n"
-        "     Use None only if they gave genuinely no usable number.\n"
-        f"2. Verify the load is {cargo_line}. Call verify_cargo_condition.\n"
-        "3. Proactively prep receiving: call assign_dock, then tell the driver the dock and "
-        "which gate to check in at.\n"
-        "4. Call assess_risk — it runs the predictive model and scores the risk to the "
-        "production line. If it returns must_alert=true (WARNING or CRITICAL), call "
-        "alert_logistics_team with the recommended action. Do NOT alarm the driver — "
-        "the alert goes to the shipper's team, not to them.\n"
-        "5. Give a short, warm sign-off confirming the team has been notified, then call "
-        "end_call in the same turn.\n\n"
-        "HOW TO TALK — you're a real dispatcher on the phone, not a chatbot:\n"
-        "- Keep it to 1–2 short sentences per turn. Ask ONE thing at a time.\n"
-        "- Lead the call; the driver is busy. Skip filler like \"Absolutely!\" or "
-        "\"I'd be happy to.\" Go straight to the point.\n"
-        "- Use contractions. Fragments are fine. Read times in words "
-        "(\"seven thirty\", not \"7:30\").\n"
-        "- Responses are spoken aloud. No bullet points, no emojis, no reading out tool names, "
-        "JSON, or risk scores. Never read internal scores or alert text to the driver.\n\n"
-        "Open the call by identifying yourself and the shipper, stating the scheduled "
-        "delivery, and asking the driver to confirm their ETA and current location — "
-        "like: \"Hi, this is FreightVoice calling on behalf of "
-        f"{shipment['shipper']}. You're scheduled to deliver {shipment['commodity']} to "
-        f"{shipment['dock']} at {shipment['appointment']}. Can you confirm your ETA and "
-        "current location?\""
-    )
+    # The system prompt is the one improvable artifact — rendered from the
+    # active template in prompt_store (default, or a self-improved override that
+    # has already beaten the regression eval). See auto_improve.py.
+    system_instruction = prompt_store.render_carrier(_carrier_fields(load_id))
 
     greeting = (
         "You are FreightVoice and you just dialed the driver. Open the call now: identify "
@@ -576,7 +555,7 @@ def build_supplier_compliance(supplier_id: str) -> tuple[list, str, str]:
             {"ok": True, "escalated_to": f"{supplier['buyer']} procurement", "reason": reason}
         )
 
-    async def end_call(params: FunctionCallParams) -> None:
+    async def end_call(params: FunctionCallParams, call_id: str | None = None) -> None:
         """End the call. Only call this AFTER you've said goodbye in the same
         turn (in the supplier's language). The pipeline flushes speech and hangs up."""
         logger.info(f"end_call invoked for {supplier_id} — final state: {call_state}")

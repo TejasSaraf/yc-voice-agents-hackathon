@@ -120,8 +120,9 @@ export default function LoadsTable({ shipments, onCall, callingId }) {
                         onClick={() => onCall(s)}
                         disabled={callingId === s.load_id}
                         className="rounded-md border border-gray-300 bg-white px-3 py-1 text-xs font-semibold text-gray-800 hover:bg-gray-900 hover:text-white disabled:opacity-40"
+                        title="Place an outbound AI call to this carrier"
                       >
-                        {callingId === s.load_id ? "Calling…" : "Call"}
+                        {callingId === s.load_id ? "Calling…" : "Call carrier"}
                       </button>
                     </div>
                   </td>

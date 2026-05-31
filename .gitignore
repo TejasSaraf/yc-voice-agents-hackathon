@@ -255,3 +255,6 @@ server/.live_calls.json.tmp
 # FreightVoice post-call records + evaluation outputs (Cekura / self-improve)
 server/.call_logs/
 server/.eval_results/
+
+# FreightVoice self-improved prompt overrides + changelog (auto_improve.py)
+server/.prompt_overrides/

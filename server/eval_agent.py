@@ -341,6 +341,26 @@ def run_persona(persona: Persona, system_prompt: str, greeting: str, max_turns: 
     )
 
 
+def score_prompt(system_prompt: str, greeting: str, repeat: int = 1) -> dict:
+    """Run every persona against a GIVEN system prompt and return a summary.
+
+    Used by auto_improve.py to compare a candidate prompt against the current
+    one on the same regression suite. Returns pass count, per-persona verdicts,
+    and mean LLM latency.
+    """
+    results: list[CaseResult] = []
+    for persona in PERSONAS:
+        for _ in range(repeat):
+            results.append(run_persona(persona, system_prompt, greeting))
+    all_lat = [l for r in results for l in r.turn_latencies]
+    return {
+        "passed": sum(1 for r in results if r.passed),
+        "total": len(results),
+        "by_persona": {r.persona: r.passed for r in results},
+        "mean_latency": mean(all_lat) if all_lat else 0.0,
+    }
+
+
 def _print_scorecard(results: list[CaseResult]) -> None:
     print("\n" + "=" * 74)
     print("FreightVoice eval scorecard  (thinking={})".format(os.getenv("NEMOTRON_ENABLE_THINKING", "true")))

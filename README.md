@@ -1,271 +1,113 @@
-# YC Voice Agents Hackathon
+# FreightVoice 🚛📞
 
-Welcome to the YC Voice Agents Hackathon, hosted by [Cekura](https://cekura.com) and [Daily](https://daily.co), in partnership with [NVIDIA](https://nvidia.com), [AWS](https://aws.amazon.com), and [Twilio](https://twilio.com).
+**AI voice agents that place outbound calls to freight carriers so a factory's production line never stops.**
 
-The goal of this event is to learn about building, scaling, evaluating, and continuously improving voice agents.
+---
 
-## Schedule, rules, and prizes
+## 1. What is this?
 
-This is a one-day event. Please arrive by 8:30. We'll kick things off at 9:00.
+When a manufacturer is waiting on an outbound part, a logistics coordinator spends the day on the phone — dialing carriers, asking "where's my truck," and praying the line doesn't go down (a stalled assembly line costs up to **$1.8M/hour**). That's ~80 manual calls a day, and the signal that matters — *"this load is going to be late"* — almost always arrives too late to act on.
 
-### Schedule
+**FreightVoice** automates those calls. For every inbound load, an AI voice agent **calls the driver**, and in natural conversation:
 
-  - 8:00 AM – Doors open & registration
-  - 8:30 AM – Breakfast
-  - 9:00 AM – Welcome / Hackathon begins
-  - 12:00 PM – Lunch
-  - 6:00 PM – Submissions due
-  - 6:00 - 8:00 PM – Dinner, demos, and conversation
-  - 8:00 PM – Judges' presentations
-  - 9:00 PM – We all go home
+1. Confirms **ETA + current location**, and reads the driver's **tone** (confident / calm / uncertain / frustrated).
+2. Verifies the **cargo condition** (sealed, temperature-controlled).
+3. **Assigns a dock + gate** and preps receiving.
+4. Runs a **predictive risk model** on the load.
+5. **Escalates to the logistics team** with a recommended action — *only* when the line is genuinely at risk.
 
-### General guidance
+The coordinator stops dialing and just watches a dashboard, handling exceptions. "Inbound logistics" = the freight coming *into* the plant; the **calls are outbound** (the agent dials the carrier).
 
-First of all, please respect the YC space. We very much appreciate YC hosting these events. Stay in the designated areas, clean up after meals, and in general be a good guest.
+**Pipeline:** Twilio ☎️ → Pipecat → Gradium STT → **NVIDIA Nemotron-3-Super-120B** (vLLM) → Gradium TTS.
 
-Build something new for this hackathon. Use the tools from Cekura to evaluate and improve the performance of what you build. Use Pipecat as the orchestration framework for your voice agent. We also encourage you to use the open source models from NVIDIA, but it's okay to use any models that work well for your project.
+---
 
-There will be engineers from Cekura, Daily, NVIDIA, AWS, and Twilio available to help you with your project. Don't hesitate to find us.
+## 2. Demo video (< 60s)
 
-Judging will start at 6:00. In general, the judges want to showcase interesting projects rather than just pick winners. So don't worry too much about what the judges are looking for in a project. Build something that demonstrates creativity, is interesting on a technical level, or solves a real problem! But do keep in mind that the judges want to see great examples of using Cekura to improve voice agent performance, and using open source models from NVIDIA.
+**▶ [Watch the demo (under 60 seconds)](ADD_YOUR_LINK_HERE)**
 
+It's a live call, not a feature tour: we trigger a call from the dashboard, the agent talks a stressed, running-late driver through ETA → cargo → dock, scores the load as **at-risk**, and escalates to logistics — all watchable on the dashboard in real time.
 
-# Tech stack and starting points.
+---
 
-This repo contains two versions of a voice agent built with [Pipecat](https://pipecat.ai).
+## 3. How we used Cekura, Nemotron, and Pipecat
 
-The demo bot **Field & Flower** is a neighborhood flower shop: callers order a bouquet for delivery while the bot looks up the catalog, captures delivery details, and places the order. All backend calls are mocked, so the starter runs with nothing but AI service keys.
+### NVIDIA Nemotron (open-weights model) — the agent's brain
+`nemotron-3-super` (120B) served via vLLM's OpenAI-compatible API drives the entire conversation **and** the tool-calling. It decides what to say, classifies the driver's sentiment, converts fuzzy speech ("about 30 out, maybe more") into a minute count, and calls our six tools (`confirm_eta`, `verify_cargo_condition`, `assign_dock`, `assess_risk`, `alert_logistics_team`, `end_call`) in sequence. We run it as a **reasoning model with thinking ON** so its chain-of-thought streams in the hidden `reasoning_content` channel and never reaches the caller's ear.
 
-## Version 1 — GPT-4.1
+### Pipecat — the real-time voice orchestration
+Pipecat wires the telephony pipeline (Twilio WebSocket → STT → LLM → TTS → back) and the turn-taking. The hard part of voice isn't the prompt — it's **knowing when the human stopped talking** over compressed 8 kHz phone audio. We tuned: `MinWordsUserTurnStartStrategy` (start a turn on transcribed *words*, not raw VAD blips) + `SpeechTimeoutUserTurnStopStrategy` + `AlwaysUserMuteStrategy` (mute the mic while the bot speaks, to kill speakerphone echo that was self-interrupting the agent). A tail `CallRecorder` collects per-service TTFB latency.
 
-You can start with this before the hackathon, if you want to. Or test GPT-4.1 and Nemotron side-by-side during the hackathon, using Cekura.
+### Cekura — testing, evaluation, and self-improvement
+**Goal:** close the loop — observe every real call, evaluate it, and turn failures into prompt improvements without regressing.
 
-This bot only requires a Gradium API key and an OpenAI API key. Sign up for free at [Gradium](https://gradium.ai). We'll provide a code for Gradium credits, during the event.
+- **Observability:** every completed call ships its transcript + per-turn latency to Cekura (`/observability/v1/observe/`), which runs its judges. This worked smoothly once we found the right `transcript_type`.
+- **Self-improvement:** we built a **gated** loop (`auto_improve.py`): summarize issues from recent calls → ask the model to rewrite the prompt → **score the candidate against the current prompt on a regression suite** → apply the new prompt *only if it strictly wins with no per-persona regression*. The live bot picks up a promoted prompt on its next call, no restart.
 
-- **STT:** [Gradium](https://gradium.ai)
-- **LLM:** [OpenAI Responses API](https://platform.openai.com/docs/api-reference/responses) (GPT-4.1)
-- **TTS:** [Gradium](https://gradium.ai)
-- **Transports:** SmallWebRTC (local dev) and [Twilio](https://www.twilio.com/en-us) (production telephony)
-- **Deploy target:** [Pipecat Cloud](https://pipecat.daily.co)
+**How much did we improve performance?** Our offline regression suite (`eval_agent.py`, 3 driver personas driving the real Nemotron model) sits at **3/3 pass** — sentiment classification, full tool sequence, correct escalation, and clean call completion. The gated loop's job is to *protect* that score: in testing it correctly **rejected** same-scoring rewrites (no needless drift) and surfaced a real regression — a call that didn't end cleanly because of a hallucinated tool argument (see feedback). We couldn't run Cekura's hosted `improve_prompt` rewriter end-to-end (server-side 500 — see feedback), so the applied improvement loop is the local eval-gated one.
 
-## Version 2
+---
 
-NVIDIA models hosted on AWS, available during the hackathon.
+## 4. What we built **during** the hackathon
 
-```
-  export NVIDIA_ASR_URL=ws://44.241.251.184:8080
-  export NEMOTRON_LLM_URL=http://nemotron-fleet-alb-1322439314.us-west-2.elb.amazonaws.com/v1
-  export NEMOTRON_LLM_MODEL=nvidia/nemotron-3-super
-  ```
+**Borrowed (the starting point):** the *Field & Flower* voice-agent hackathon starter — the Pipecat ↔ Twilio transport plumbing and the Nemotron/Gradium service wrappers (`nemotron_llm.py`, `nvidia_stt.py`).
 
-- **STT:** [Nemotron Speech Streaming](https://huggingface.co/nvidia/nemotron-speech-streaming-en-0.6b)
-- **LLM:** [Nemotron 3 Super 120B](https://huggingface.co/nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16)
-- **TTS:** [Gradium](https://gradium.ai)
-- **Transports:** SmallWebRTC (local dev) and Twilio (production telephony)
-- **Deploy target:** [Pipecat Cloud](https://pipecat.daily.co)
+**New, built today** — essentially the entire product:
 
-## Develop locally
+- **The FreightVoice domain & agent** — carrier check-in + supplier-compliance scenarios, the six-tool call procedure, and the system prompt (`freight_scenarios.py`).
+- **Predictive risk model** (`risk_scorer.py`) — a weighted score (sentiment 0.30, historical OTD 0.20, time-pressure 0.20, weather 0.15, ETA-vagueness 0.15) through a sigmoid → 0–100 + Monitor/Warning/Critical, with **live NOAA weather** lookups per lane.
+- **Outbound orchestration** (`outbound.py`, `api_server.py`) — dashboard / risk-threshold / external-signal / missed-milestone triggers, plus per-call load routing.
+- **Operations dashboard + YC-style landing page** (`frontend/`) — a monochrome enterprise data-grid of inbound loads and **call records**, each scored, with live call status and a per-call eval breakdown.
+- **The evaluation + self-improvement stack** — per-call local scoring (`call_eval.py`), the offline persona regression harness (`eval_agent.py`), Cekura observability + prompt-improvement wiring (`cekura_client.py`, `self_improve.py`), and the **gated prompt self-improvement loop** (`auto_improve.py` + `prompt_store.py`).
+- **Reliability fixes from real calls** — graceful call finalization on every end path, JSON-safe call records, and tolerance for hallucinated tool arguments.
 
-Get the bot running over WebRTC in your browser before you push to the cloud or wire up the phone, for a faster iteration loop.
+---
 
-### Prerequisites
+## 5. Feedback on the tools
 
-- Python 3.11+
-- [`uv`](https://docs.astral.sh/uv/getting-started/installation/) package manager
-- API keys for [OpenAI](https://platform.openai.com) and [Gradium](https://gradium.ai)
+### NVIDIA Nemotron
+**Did well:**
+- **Tool-calling is strong** — it reliably ran our six-step procedure in order and rarely skipped a step.
+- **Sentiment reading is genuinely good** — it nailed "uncertain" vs "frustrated" from messy, real phone transcripts, which is the highest-weighted signal in our risk model.
+- Thinking-in-a-separate-channel is exactly right for voice.
 
-### Setup
+**Could be better:**
+- **Hallucinated tool arguments.** On a live call it invoked `end_call(call_id="call_123")` — a parameter that doesn't exist — which threw and left **dead air** until the human hung up. We had to make tools tolerate unexpected kwargs. Tighter adherence to the provided tool schema (no invented args) matters a lot for voice, where a thrown tool = silence on the line.
+- **TTFB while thinking** is ~2–5s to the first answer token; noticeable on a phone call. A faster "reason briefly, answer now" mode for latency-sensitive turns would help.
 
-1. **Clone and enter the server directory:**
+### Cekura (self-improvement loops) — including bugs
+**What worked:** observability ingestion was smooth once we found the right format.
 
-   ```bash
-   git clone https://github.com/pipecat-ai/yc-voice-agents-hackathon.git
-   cd yc-voice-agents-hackathon/server
-   ```
+**Bugs / friction we hit:**
+1. **`transcript_type: "custom"` 400s** — the expected value is rejected (`"custom" is not a valid choice`). The value that actually works is **`"pipecat"`** for a plain `{role, content}` transcript. This cost us real time.
+2. **`improve_prompt` returns a generic 500** for a well-formed request when the agent has **no evaluation metrics configured**. It validated our payload (`agent_id` + integer `call_logs` + `prompt`) and then 500'd with *"Something went wrong, please try again."* It should fail with a clear 4xx (e.g. *"no metrics configured for this agent"*) instead of a 500 — we burned time assuming our request was malformed.
+3. **Inconsistent field names** — `observe` wants `agent`, but `improve_prompt` wants `agent_id` (and `agent` is silently ignored). `call_logs` needs an integer or ID list (not `"all"`, which is "deprecated"), and it caps silently at the number available. A consistent schema + clearer errors would make wiring the self-improvement loop much faster.
 
-2. **Configure API keys:**
+**Net:** the *concept* (observe → judge → improve_prompt) is exactly the loop we wanted; the hosted rewriter just wasn't reachable for an agent without preconfigured metrics, so we built a local eval-gated version to demonstrate the loop safely.
 
-   ```bash
-   cp .env.example .env
-   # Edit .env and fill in OPENAI_API_KEY, GRADIUM_API_KEY.
-   # TWILIO_* keys are only needed when you wire up the phone (next section).
-   ```
+### Pipecat / Gradium / Twilio
+- **Pipecat** turn-taking strategies are powerful but under-documented for **telephony** specifically — SmartTurn returned `NOT_COMPLETE` on 8 kHz audio and stalled turns for ~15s; we only got reliable behavior after combining MinWords + SpeechTimeout + AlwaysUserMute. A "phone preset" would save everyone this.
+- **Direct functions** crash the pipeline on an unexpected kwarg from the LLM; gracefully dropping unknown args (or surfacing a tool error back to the model instead of an exception) would be safer for voice.
+- **Gradium** STT/TTS latency was excellent (sub-200ms TTS TTFB) and was our reliable fallback when the shared ASR endpoint stalled under load.
 
-3. **Install dependencies:**
+---
 
-   ```bash
-   uv sync
-   ```
+## 6. Try it
 
-4. **Run the bot:**
-
-   ```bash
-   # run one or the other of these
-   uv run bot-gpt.py
-   uv run bot-nemotron.py
-   ```
-
-   Open [http://localhost:7860](http://localhost:7860) and click **Connect** to start talking. First launch takes ~20s while Pipecat downloads VAD and turn-detection models.
-
-## Deploy to Pipecat Cloud
-
-Once the bot works locally, deploy to Pipecat Cloud and connect it to a Twilio phone number so anyone can call in.
-
-### Prerequisites
-
-1. [Sign up for Pipecat Cloud](https://pipecat.daily.co/sign-up)
-2. Install the [Pipecat CLI](https://github.com/pipecat-ai/pipecat-cli) and log in:
-
-   ```bash
-   uv tool install pipecat-ai-cli
-   pc cloud auth login
-   ```
-
-### Configure Twilio
-
-1. [Add credits / upgrade your Twilio account](https://twil.io/yc-hack)
-
-2. [Buy a phone number](https://help.twilio.com/articles/223135247) with voice capability.
-
-3. Get your Pipecat Cloud organization name:
-
-   ```bash
-   pc cloud organizations list
-   ```
-
-4. [Create a TwiML Bin](https://www.twilio.com/docs/serverless/twiml-bins/getting-started#create-a-new-twiml-bin) with this configuration:
-
-   ```xml
-   <?xml version="1.0" encoding="UTF-8"?>
-   <Response>
-     <Connect>
-       <Stream url="wss://api.pipecat.daily.co/ws/twilio">
-         <Parameter name="_pipecatCloudServiceHost"
-           value="flower-bot.YOUR_ORG_NAME"/>
-       </Stream>
-     </Connect>
-   </Response>
-   ```
-
-   Replace `YOUR_ORG_NAME` with the org name from step 2.
-
-5. [Attach the TwiML Bin](https://www.twilio.com/docs/serverless/twiml-bins/getting-started#wire-your-twiml-bin-up-to-an-incoming-phone-call) to your Twilio number: Go to [your phone numbers](https://console.twilio.com/go?to=/account/__account__/us1/senders-hub/list/phone-numbers/inventory) → select your
-number → under **Voice Configuration**, set method to the **TwiML Bin** you created → Save.
-
-6. [Optional] Use [Twilio Dev phone](https://www.twilio.com/docs/labs/dev-phone) for testing.
-
-### Review the deployment configuration
-
-Your deployment details are specified in the `pcc-deploy.toml` file. You can learn more about options in the [docs](https://docs.pipecat.ai/api-reference/cli/cloud/deploy#configuration-file-pcc-deploy-toml).
-
-### Upload secrets
-
+**Run locally:**
 ```bash
-pc cloud secrets set flower-bot-secrets --file .env
+# Backend (FastAPI dashboard API + outbound orchestrator)
+cd server && uv run uvicorn api_server:app --reload --port 8000
+# Voice bot (Pipecat)
+uv run bot-freightvoice.py
+# Frontend (dashboard + landing page)
+cd ../frontend && npm install && npm run dev   # http://localhost:5173
 ```
 
-This uploads everything from `.env` to Pipecat Cloud's secure storage. The bot reads from there at runtime, so you don't bake keys into the image.
-
-### Deploy
-
-Build and run your bot on Pipecat Cloud:
-
-```bash
-pc cloud deploy
-```
-
-Learn more about [cloud builds](https://docs.pipecat.ai/pipecat-cloud/guides/cloud-builds).
-
-### Call your bot
-
-Dial the Twilio number you set up. 🌷
-
-## Test your agent with Cekura
-
-[Cekura](https://cekura.com) tests and observes voice agents. For this hackathon, use it to **test the Pipecat bot you build in this repo** — run real conversations against it, score the transcripts, and fix what's failing before you demo.
-
-### Sign up
-
-Create your account at **[dashboard.cekura.ai](https://dashboard.cekura.ai)**. If you're approved for this hackathon, just sign up and your credits will show up automatically. If you don't see them, find someone from the Cekura team, they're on-site.
-
-### Onboarding (or skip it)
-
-On first login you'll land on a short setup flow that helps you create your first agent and test. Feel free to click through it — **or hit _Skip_** and jump straight to the dashboard if you'd rather set things up yourself. Either way takes a minute.
-
-### Recommended: start by testing your agent (via Claude Code)
-
-The fastest path — and what we recommend for the hackathon — is to drive Cekura from **Claude Code** using our MCP server + skills. You stay in your terminal, and Cekura handles agent creation, scenario generation, and running the test.
-
-**1. Install the Cekura skills + MCP** (Claude Code marketplace plugin — bundles the skills, slash commands, and auto-configured MCP server):
-
-```bash
-/plugin marketplace add cekura-ai/cekura-skills
-/plugin install cekura@cekura-skills
-```
-
-Repo: [github.com/cekura-ai/cekura-skills](https://github.com/cekura-ai/cekura-skills) · Full setup + other agents (Cursor, Codex, etc.): **[docs.cekura.ai → Claude Code guide](https://docs.cekura.ai/mcp/claude-code-guide)** and **[Skills](https://docs.cekura.ai/mcp/skills)**.
-
-**2. Run an end-to-end test** of your agent with a single command:
-
-```
-/cekura-report
-```
-
-This spins up anything from 10–20 evaluators (what Cekura calls test cases), runs scenarios against your Pipecat agent, and gives you back a full report — transcripts, scores, and what failed — so you can iterate fast.
-
-> When connecting your agent, **select `Pipecat` as the provider.** Details: [docs.cekura.ai → Pipecat](https://docs.cekura.ai/documentation/integrations/pipecat/automated).
-
-### FreightVoice's built-in eval, observability & self-improve loop
-
-FreightVoice wires Cekura in directly so the agent gets better after every call.
-All of it is **optional** — set `CEKURA_API_KEY` + `CEKURA_AGENT_ID` in
-`server/.env` to enable the cloud features; everything also runs fully local
-without them.
-
-| Capability | Where | What it does |
-|---|---|---|
-| **Observability (after each call)** | `server/post_call.py` + `server/call_recorder.py` | On every call end, captures the transcript (from the LLM context) + per-turn TTFB latency, writes a record to `server/.call_logs/`, and ships it to Cekura's `observability/v1/observe/` endpoint. |
-| **Evaluate with test cases** | `server/eval_agent.py` | Drives the real Nemotron LLM through scripted driver personas (late-in-rain, on-time, frustrated-breakdown), scoring sentiment, tool calls, alert correctness, and LLM latency. `--cekura` triggers Cekura cloud scenarios instead. |
-| **Self-improve** | `server/self_improve.py` | Calls Cekura's `call-logs/improve_prompt/` to propose system-prompt fixes from real calls. Falls back to a local diagnosis (latency outliers, missed alerts, echo detection) with no Cekura account. |
-| **Latency** | `bot-freightvoice.py` | Speaks a deterministic opening line via TTS the instant the driver answers (skips the ~2s opening LLM call); `FREIGHTVOICE_INSTANT_GREETING` / `NEMOTRON_ENABLE_THINKING` knobs, measurable via the eval harness. |
-
+**Evaluation & self-improvement:**
 ```bash
 cd server
-
-# 1. Regression-test the agent against scripted personas (+ latency report)
-uv run eval_agent.py
-uv run eval_agent.py --persona late_rain          # one case
-NEMOTRON_ENABLE_THINKING=false uv run eval_agent.py  # A/B latency
-
-# 2. Place real calls (dashboard / phone) — each one auto-logs to
-#    server/.call_logs/ and (if configured) to Cekura observability.
-
-# 3. Turn those calls into improvements
-uv run self_improve.py            # Cekura prompt rewrite if configured, else local diagnosis
-uv run self_improve.py --local    # force local analysis
-
-# 4. Run Cekura cloud scenarios against the live agent
-uv run eval_agent.py --cekura --scenario-ids 30,31
+uv run eval_agent.py        # offline regression: 3 driver personas vs the real model
+uv run self_improve.py      # observe-driven analysis (Cekura, or local fallback)
+uv run auto_improve.py      # gated prompt self-improvement (apply only if it beats current)
 ```
-
-## Learn more
-
-### Pipecat
-
-- [Pipecat Documentation](https://docs.pipecat.ai/)
-- [Pipecat Cloud Deployment](https://docs.pipecat.ai/pipecat-cloud/introduction)
-- [Pipecat Examples](https://github.com/pipecat-ai/pipecat-examples)
-- [Pipecat Discord](https://discord.gg/pipecat)
-
-### Twilio
-
-- [Twilio Developer Hub](https://www.twilio.com/en-us/developers)
-- [Twilio Documentation](https://www.twilio.com/docs)
-- [Twilio Dev phone](https://www.twilio.com/docs/labs/dev-phone)
-
-### Cekura
-
-- [Claude Code guide](https://docs.cekura.ai/mcp/claude-code-guide) — MCP + skills setup
-- [Cekura skills](https://docs.cekura.ai/mcp/skills) — all slash commands
-- [Pipecat integration](https://docs.cekura.ai/documentation/integrations/pipecat/automated)
-- [Cekura docs](https://docs.cekura.ai) · [dashboard](https://dashboard.cekura.ai)
