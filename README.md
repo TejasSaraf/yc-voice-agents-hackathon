@@ -1,113 +1,112 @@
-# FreightVoice 🚛📞
+# FreightVoice
 
-**AI voice agents that place outbound calls to freight carriers so a factory's production line never stops.**
+**An AI voice agent that calls freight brokers on behalf of shippers — so manufacturers stop spending their day chasing load status updates.**
 
 ---
 
 ## 1. What is this?
 
-When a manufacturer is waiting on an outbound part, a logistics coordinator spends the day on the phone — dialing carriers, asking "where's my truck," and praying the line doesn't go down (a stalled assembly line costs up to **$1.8M/hour**). That's ~80 manual calls a day, and the signal that matters — *"this load is going to be late"* — almost always arrives too late to act on.
+In freight, a **shipper** (like a manufacturer) hires a **freight broker** to find and coordinate carriers. The shipper's logistics team then spends all day calling that broker — asking "where's my truck, is it going to be late, what's the status?" A stalled assembly line costs up to **$1.8M per hour**, and the warning that a load is running late almost always arrives too late to do anything about it.
 
-**FreightVoice** automates those calls. For every inbound load, an AI voice agent **calls the driver**, and in natural conversation:
+We're solving the **shipper side** of that relationship. FreightVoice is the tool the shipper's team uses — our AI agent makes those status calls **on the shipper's behalf**, dialing the freight broker (or carrier) so no human has to. In a natural phone conversation, it:
 
-1. Confirms **ETA + current location**, and reads the driver's **tone** (confident / calm / uncertain / frustrated).
-2. Verifies the **cargo condition** (sealed, temperature-controlled).
-3. **Assigns a dock + gate** and preps receiving.
-4. Runs a **predictive risk model** on the load.
-5. **Escalates to the logistics team** with a recommended action — *only* when the line is genuinely at risk.
+1. Gets the current location and ETA — and picks up on whether the driver sounds confident or stressed
+2. Checks that the cargo is sealed and in good condition
+3. Assigns a dock and gate so receiving is ready
+4. Runs a quick risk score on that load
+5. Alerts the logistics team only when something actually needs human attention
 
-The coordinator stops dialing and just watches a dashboard, handling exceptions. "Inbound logistics" = the freight coming *into* the plant; the **calls are outbound** (the agent dials the carrier).
+The person managing logistics stops making calls and just watches a dashboard, stepping in for real exceptions. **All calls are outbound — the agent dials out.**
 
-**Pipeline:** Twilio ☎️ → Pipecat → Gradium STT → **NVIDIA Nemotron-3-Super-120B** (vLLM) → Gradium TTS.
+**How it works under the hood:** Twilio handles the phone connection → Pipecat manages the voice pipeline → Gradium transcribes speech → NVIDIA Nemotron-3-Super-120B runs the conversation and decides what to do → Gradium converts the response back to speech.
 
 ---
 
-## 2. Demo video (< 60s)
+## 2. Demo video (under 60 seconds)
 
-**▶ [Watch the demo (under 60 seconds)](ADD_YOUR_LINK_HERE)**
+**[Watch the demo](https://youtube.com/shorts/b9T2XrsBO7M?si=wIV5iGA5S-mpny5J)**
 
-It's a live call, not a feature tour: we trigger a call from the dashboard, the agent talks a stressed, running-late driver through ETA → cargo → dock, scores the load as **at-risk**, and escalates to logistics — all watchable on the dashboard in real time.
+The demo shows a live call: we trigger it from the dashboard, the agent talks to a driver who's running behind, gets the ETA and cargo status, scores the load as at-risk, and escalates to logistics — all visible on the dashboard in real time.
 
 ---
 
 ## 3. How we used Cekura, Nemotron, and Pipecat
 
-### NVIDIA Nemotron (open-weights model) — the agent's brain
-`nemotron-3-super` (120B) served via vLLM's OpenAI-compatible API drives the entire conversation **and** the tool-calling. It decides what to say, classifies the driver's sentiment, converts fuzzy speech ("about 30 out, maybe more") into a minute count, and calls our six tools (`confirm_eta`, `verify_cargo_condition`, `assign_dock`, `assess_risk`, `alert_logistics_team`, `end_call`) in sequence. We run it as a **reasoning model with thinking ON** so its chain-of-thought streams in the hidden `reasoning_content` channel and never reaches the caller's ear.
+### NVIDIA Nemotron — the agent's brain
 
-### Pipecat — the real-time voice orchestration
-Pipecat wires the telephony pipeline (Twilio WebSocket → STT → LLM → TTS → back) and the turn-taking. The hard part of voice isn't the prompt — it's **knowing when the human stopped talking** over compressed 8 kHz phone audio. We tuned: `MinWordsUserTurnStartStrategy` (start a turn on transcribed *words*, not raw VAD blips) + `SpeechTimeoutUserTurnStopStrategy` + `AlwaysUserMuteStrategy` (mute the mic while the bot speaks, to kill speakerphone echo that was self-interrupting the agent). A tail `CallRecorder` collects per-service TTFB latency.
+We used `nemotron-3-super` (120B), an open-weights model, served via a vLLM endpoint with an OpenAI-compatible API. It drives the entire conversation: deciding what to say, reading the driver's tone, turning vague answers like "about 30 out, maybe more" into a concrete ETA, and calling six tools in sequence (`confirm_eta`, `verify_cargo_condition`, `assign_dock`, `assess_risk`, `alert_logistics_team`, `end_call`).
 
-### Cekura — testing, evaluation, and self-improvement
-**Goal:** close the loop — observe every real call, evaluate it, and turn failures into prompt improvements without regressing.
+We ran it in reasoning mode, so the model's chain of thought stays hidden and never gets read aloud to the driver.
 
-- **Observability:** every completed call ships its transcript + per-turn latency to Cekura (`/observability/v1/observe/`), which runs its judges. This worked smoothly once we found the right `transcript_type`.
-- **Self-improvement:** we built a **gated** loop (`auto_improve.py`): summarize issues from recent calls → ask the model to rewrite the prompt → **score the candidate against the current prompt on a regression suite** → apply the new prompt *only if it strictly wins with no per-persona regression*. The live bot picks up a promoted prompt on its next call, no restart.
+### Pipecat — real-time voice orchestration
 
-**How much did we improve performance?** Our offline regression suite (`eval_agent.py`, 3 driver personas driving the real Nemotron model) sits at **3/3 pass** — sentiment classification, full tool sequence, correct escalation, and clean call completion. The gated loop's job is to *protect* that score: in testing it correctly **rejected** same-scoring rewrites (no needless drift) and surfaced a real regression — a call that didn't end cleanly because of a hallucinated tool argument (see feedback). We couldn't run Cekura's hosted `improve_prompt` rewriter end-to-end (server-side 500 — see feedback), so the applied improvement loop is the local eval-gated one.
+Pipecat connects everything: the Twilio phone line → speech-to-text → the language model → text-to-speech → back to the caller. The trickiest part of phone calls isn't the AI — it's knowing when someone has actually finished talking on compressed, low-quality audio.
+
+We tuned three settings to get reliable turn-taking: start a response only after real transcribed words (not noise), use a speech timeout to detect when the driver stopped talking, and mute the mic while the agent speaks to stop the agent from interrupting itself through speakerphone echo.
+
+### Cekura — testing and self-improvement
+
+**What we were trying to do:** after each real call, automatically check whether the agent did its job, and use those results to improve the prompt — without breaking what was already working.
+
+We built a gated improvement loop:
+1. Every completed call sends its transcript and timing data to Cekura, which runs its evaluation judges
+2. We use those results (plus a local fallback when Cekura's hosted rewriter wasn't reachable) to generate a candidate updated prompt
+3. Before applying it, we run the candidate against an offline regression suite — three driver personas tested against the real Nemotron model
+4. We only swap in the new prompt if it strictly improves things with no regressions
+
+**Results:** our offline suite runs at 3/3 pass — correct sentiment classification, full tool sequence, proper escalation, and clean call ending. The gated loop correctly rejected same-scoring rewrites (avoiding meaningless drift) and caught a real regression where the agent didn't end the call cleanly due to a bad tool argument.
 
 ---
 
-## 4. What we built **during** the hackathon
+## 4. What we built during the hackathon
 
-**Borrowed (the starting point):** the *Field & Flower* voice-agent hackathon starter — the Pipecat ↔ Twilio transport plumbing and the Nemotron/Gradium service wrappers (`nemotron_llm.py`, `nvidia_stt.py`).
+**What we started with:** the Field & Flower voice-agent starter — the Twilio/Pipecat plumbing and service wrappers for Nemotron and Gradium.
 
-**New, built today** — essentially the entire product:
+**What we built new during the hackathon:**
 
-- **The FreightVoice domain & agent** — carrier check-in + supplier-compliance scenarios, the six-tool call procedure, and the system prompt (`freight_scenarios.py`).
-- **Predictive risk model** (`risk_scorer.py`) — a weighted score (sentiment 0.30, historical OTD 0.20, time-pressure 0.20, weather 0.15, ETA-vagueness 0.15) through a sigmoid → 0–100 + Monitor/Warning/Critical, with **live NOAA weather** lookups per lane.
-- **Outbound orchestration** (`outbound.py`, `api_server.py`) — dashboard / risk-threshold / external-signal / missed-milestone triggers, plus per-call load routing.
-- **Operations dashboard + YC-style landing page** (`frontend/`) — a monochrome enterprise data-grid of inbound loads and **call records**, each scored, with live call status and a per-call eval breakdown.
-- **The evaluation + self-improvement stack** — per-call local scoring (`call_eval.py`), the offline persona regression harness (`eval_agent.py`), Cekura observability + prompt-improvement wiring (`cekura_client.py`, `self_improve.py`), and the **gated prompt self-improvement loop** (`auto_improve.py` + `prompt_store.py`).
-- **Reliability fixes from real calls** — graceful call finalization on every end path, JSON-safe call records, and tolerance for hallucinated tool arguments.
+- **The FreightVoice agent** — the carrier check-in scenario, the six-step call procedure, and the system prompt
+- **Risk scoring** (`risk_scorer.py`) — a weighted score combining driver sentiment, historical on-time delivery, time pressure, weather, and ETA confidence, with live NOAA weather lookups per shipping lane
+- **Outbound call orchestration** (`outbound.py`, `api_server.py`) — triggering calls based on risk thresholds, missed milestones, or manual dispatch
+- **Operations dashboard and landing page** (`frontend/`) — a live view of all loads and call records, each with a risk score and call evaluation breakdown
+- **The evaluation and self-improvement stack** — per-call scoring, an offline persona regression harness, Cekura integration, and the gated prompt improvement loop
+- **Reliability fixes from real calls** — handling calls that end unexpectedly, tolerating when the model invents tool arguments, and keeping call records JSON-safe
 
 ---
 
 ## 5. Feedback on the tools
 
 ### NVIDIA Nemotron
-**Did well:**
-- **Tool-calling is strong** — it reliably ran our six-step procedure in order and rarely skipped a step.
-- **Sentiment reading is genuinely good** — it nailed "uncertain" vs "frustrated" from messy, real phone transcripts, which is the highest-weighted signal in our risk model.
-- Thinking-in-a-separate-channel is exactly right for voice.
 
-**Could be better:**
-- **Hallucinated tool arguments.** On a live call it invoked `end_call(call_id="call_123")` — a parameter that doesn't exist — which threw and left **dead air** until the human hung up. We had to make tools tolerate unexpected kwargs. Tighter adherence to the provided tool schema (no invented args) matters a lot for voice, where a thrown tool = silence on the line.
-- **TTFB while thinking** is ~2–5s to the first answer token; noticeable on a phone call. A faster "reason briefly, answer now" mode for latency-sensitive turns would help.
+**What it did well:**
+- Tool calling is solid — it reliably ran our six-step procedure in order and rarely skipped a step
+- Sentiment reading is genuinely good — it correctly classified driver tone from real, messy phone transcripts, which is the most important signal in our risk model
+- Keeping reasoning in a separate channel so it never reaches the caller is exactly the right design for voice
 
-### Cekura (self-improvement loops) — including bugs
-**What worked:** observability ingestion was smooth once we found the right format.
+**Where it could improve:**
+- **It invents tool arguments.** On a live call it called `end_call(call_id="call_123")` — a parameter we never defined. That threw an error and left dead air on the line until the driver hung up. We had to patch our tools to silently ignore unexpected arguments. For voice, a failed tool call means silence, which is bad — tighter adherence to the schema would help a lot.
+- **First-response latency while thinking** is 2–5 seconds. That's noticeable on a phone call. A mode that reasons briefly but responds faster would make it more natural for real-time conversations.
 
-**Bugs / friction we hit:**
-1. **`transcript_type: "custom"` 400s** — the expected value is rejected (`"custom" is not a valid choice`). The value that actually works is **`"pipecat"`** for a plain `{role, content}` transcript. This cost us real time.
-2. **`improve_prompt` returns a generic 500** for a well-formed request when the agent has **no evaluation metrics configured**. It validated our payload (`agent_id` + integer `call_logs` + `prompt`) and then 500'd with *"Something went wrong, please try again."* It should fail with a clear 4xx (e.g. *"no metrics configured for this agent"*) instead of a 500 — we burned time assuming our request was malformed.
-3. **Inconsistent field names** — `observe` wants `agent`, but `improve_prompt` wants `agent_id` (and `agent` is silently ignored). `call_logs` needs an integer or ID list (not `"all"`, which is "deprecated"), and it caps silently at the number available. A consistent schema + clearer errors would make wiring the self-improvement loop much faster.
+### Cekura
 
-**Net:** the *concept* (observe → judge → improve_prompt) is exactly the loop we wanted; the hosted rewriter just wasn't reachable for an agent without preconfigured metrics, so we built a local eval-gated version to demonstrate the loop safely.
+**What worked:** once we found the right format, sending transcripts and getting evaluations back was smooth.
 
-### Pipecat / Gradium / Twilio
-- **Pipecat** turn-taking strategies are powerful but under-documented for **telephony** specifically — SmartTurn returned `NOT_COMPLETE` on 8 kHz audio and stalled turns for ~15s; we only got reliable behavior after combining MinWords + SpeechTimeout + AlwaysUserMute. A "phone preset" would save everyone this.
-- **Direct functions** crash the pipeline on an unexpected kwarg from the LLM; gracefully dropping unknown args (or surfacing a tool error back to the model instead of an exception) would be safer for voice.
-- **Gradium** STT/TTS latency was excellent (sub-200ms TTS TTFB) and was our reliable fallback when the shared ASR endpoint stalled under load.
+**Bugs and friction we hit:**
+
+1. **Wrong `transcript_type` value in the docs.** We tried `"custom"` as documented and got a 400 error. The value that actually works is `"pipecat"` for a plain `{role, content}` transcript. Cost us real time tracking this down.
+
+2. **`improve_prompt` returns a 500 with no explanation** when the agent has no evaluation metrics configured. It accepted our request, then returned a generic "Something went wrong, please try again." It should return a clear 4xx error like "no metrics configured for this agent" — we assumed our request was malformed and spent a long time debugging it.
+
+3. **Inconsistent field names between endpoints.** The `observe` endpoint wants `agent`, but `improve_prompt` wants `agent_id` (and silently ignores `agent`). The `call_logs` field needs an ID or integer — passing `"all"` is deprecated and fails silently. A consistent schema and clearer error messages would make wiring the self-improvement loop much faster.
+
+The core concept — observe every call, judge it, use that to improve the prompt — is exactly the loop we wanted to build. We just couldn't get the hosted rewriter to work end-to-end, so we built a local eval-gated version to demonstrate the same loop safely.
+
+### Pipecat
+
+- Turn-taking strategies are powerful but poorly documented for phone calls specifically. SmartTurn returned `NOT_COMPLETE` on 8 kHz audio and stalled turns for up to 15 seconds. We only got reliable behavior after combining MinWords + SpeechTimeout + AlwaysUserMute. A phone-call preset with these settings already configured would save a lot of time.
+- When the language model invents a tool argument, it crashes the pipeline instead of surfacing the error back to the model. Graceful handling (drop the unknown arg or return a tool error) would be much safer for voice, where a crash means silence.
+
+### Gradium (STT/TTS)
+
+STT and TTS latency was excellent — sub-200ms TTS first-token — and was our reliable fallback when the shared ASR endpoint got slow under load.
 
 ---
-
-## 6. Try it
-
-**Run locally:**
-```bash
-# Backend (FastAPI dashboard API + outbound orchestrator)
-cd server && uv run uvicorn api_server:app --reload --port 8000
-# Voice bot (Pipecat)
-uv run bot-freightvoice.py
-# Frontend (dashboard + landing page)
-cd ../frontend && npm install && npm run dev   # http://localhost:5173
-```
-
-**Evaluation & self-improvement:**
-```bash
-cd server
-uv run eval_agent.py        # offline regression: 3 driver personas vs the real model
-uv run self_improve.py      # observe-driven analysis (Cekura, or local fallback)
-uv run auto_improve.py      # gated prompt self-improvement (apply only if it beats current)
-```
