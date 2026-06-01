@@ -52,10 +52,15 @@ export default function Landing() {
             <a href="#faq" className="hover:text-gray-900">FAQ</a>
           </nav>
           <a
-            href={DASH}
-            className="rounded-md bg-gray-900 px-4 py-2 text-sm font-semibold text-white hover:bg-gray-700"
+            href="https://www.youtube.com/shorts/b9T2XrsBO7M"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="flex items-center gap-2 rounded-md border border-gray-300 bg-white px-4 py-2 text-sm font-semibold text-gray-800 hover:bg-gray-50"
           >
-            Get Started
+            <svg className="h-3.5 w-3.5 text-red-400" viewBox="0 0 24 24" fill="currentColor">
+              <path d="M23.498 6.186a3.016 3.016 0 0 0-2.122-2.136C19.505 3.545 12 3.545 12 3.545s-7.505 0-9.377.505A3.017 3.017 0 0 0 .502 6.186C0 8.07 0 12 0 12s0 3.93.502 5.814a3.016 3.016 0 0 0 2.122 2.136c1.871.505 9.376.505 9.376.505s7.505 0 9.377-.505a3.015 3.015 0 0 0 2.122-2.136C24 15.93 24 12 24 12s0-3.93-.502-5.814zM9.545 15.568V8.432L15.818 12l-6.273 3.568z"/>
+            </svg>
+            Watch Demo
           </a>
         </div>
       </header>
@@ -77,18 +82,12 @@ export default function Landing() {
         </p>
         <div className="mt-9 flex flex-col items-center justify-center gap-3 sm:flex-row">
           <a
-            href={DASH}
-            className="w-full rounded-md bg-gray-900 px-6 py-3 text-sm font-semibold text-white hover:bg-gray-700 sm:w-auto"
-          >
-            Get Started: open the dashboard
-          </a>
-          <a
             href="https://www.youtube.com/shorts/b9T2XrsBO7M"
             target="_blank"
             rel="noopener noreferrer"
-            className="w-full rounded-md border border-gray-300 px-6 py-3 text-sm font-semibold text-gray-800 hover:bg-gray-50 sm:w-auto flex items-center justify-center gap-2"
+            className="w-full rounded-md border border-gray-300 bg-white px-6 py-3 text-sm font-semibold text-gray-800 hover:bg-gray-50 sm:w-auto flex items-center justify-center gap-2"
           >
-            <svg className="h-4 w-4 text-red-600" viewBox="0 0 24 24" fill="currentColor">
+            <svg className="h-4 w-4 text-red-400" viewBox="0 0 24 24" fill="currentColor">
               <path d="M23.498 6.186a3.016 3.016 0 0 0-2.122-2.136C19.505 3.545 12 3.545 12 3.545s-7.505 0-9.377.505A3.017 3.017 0 0 0 .502 6.186C0 8.07 0 12 0 12s0 3.93.502 5.814a3.016 3.016 0 0 0 2.122 2.136c1.871.505 9.376.505 9.376.505s7.505 0 9.377-.505a3.015 3.015 0 0 0 2.122-2.136C24 15.93 24 12 24 12s0-3.93-.502-5.814zM9.545 15.568V8.432L15.818 12l-6.273 3.568z"/>
             </svg>
             Watch Demo
@@ -273,10 +272,15 @@ export default function Landing() {
           inbound load end to end.
         </p>
         <a
-          href={DASH}
-          className="mt-8 inline-block rounded-md bg-gray-900 px-7 py-3 text-sm font-semibold text-white hover:bg-gray-700"
+          href="https://www.youtube.com/shorts/b9T2XrsBO7M"
+          target="_blank"
+          rel="noopener noreferrer"
+          className="mt-8 inline-flex items-center gap-2 rounded-md border border-gray-300 bg-white px-7 py-3 text-sm font-semibold text-gray-800 hover:bg-gray-50"
         >
-          Get Started
+          <svg className="h-4 w-4 text-red-400" viewBox="0 0 24 24" fill="currentColor">
+            <path d="M23.498 6.186a3.016 3.016 0 0 0-2.122-2.136C19.505 3.545 12 3.545 12 3.545s-7.505 0-9.377.505A3.017 3.017 0 0 0 .502 6.186C0 8.07 0 12 0 12s0 3.93.502 5.814a3.016 3.016 0 0 0 2.122 2.136c1.871.505 9.376.505 9.376.505s7.505 0 9.377-.505a3.015 3.015 0 0 0 2.122-2.136C24 15.93 24 12 24 12s0-3.93-.502-5.814zM9.545 15.568V8.432L15.818 12l-6.273 3.568z"/>
+          </svg>
+          Watch Demo
         </a>
       </section>
 
