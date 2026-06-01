@@ -71,7 +71,7 @@ export default function Landing() {
         </h1>
         <p className="mx-auto mt-6 max-w-2xl text-lg leading-relaxed text-gray-600">
           FreightVoice is an AI voice agent that places outbound calls to your
-          carriers, drivers, and suppliers — confirming ETAs, verifying cargo,
+          carriers, drivers, and suppliers, confirming ETAs, verifying cargo,
           prepping docks, and scoring delivery risk on every inbound load. Your
           team stops dialing 80 numbers a day and just handles the exceptions.
         </p>
@@ -80,7 +80,18 @@ export default function Landing() {
             href={DASH}
             className="w-full rounded-md bg-gray-900 px-6 py-3 text-sm font-semibold text-white hover:bg-gray-700 sm:w-auto"
           >
-            Get Started — open the dashboard
+            Get Started: open the dashboard
+          </a>
+          <a
+            href="https://www.youtube.com/shorts/b9T2XrsBO7M"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="w-full rounded-md border border-gray-300 px-6 py-3 text-sm font-semibold text-gray-800 hover:bg-gray-50 sm:w-auto flex items-center justify-center gap-2"
+          >
+            <svg className="h-4 w-4 text-red-600" viewBox="0 0 24 24" fill="currentColor">
+              <path d="M23.498 6.186a3.016 3.016 0 0 0-2.122-2.136C19.505 3.545 12 3.545 12 3.545s-7.505 0-9.377.505A3.017 3.017 0 0 0 .502 6.186C0 8.07 0 12 0 12s0 3.93.502 5.814a3.016 3.016 0 0 0 2.122 2.136c1.871.505 9.376.505 9.376.505s7.505 0 9.377-.505a3.015 3.015 0 0 0 2.122-2.136C24 15.93 24 12 24 12s0-3.93-.502-5.814zM9.545 15.568V8.432L15.818 12l-6.273 3.568z"/>
+            </svg>
+            Watch Demo
           </a>
           <a
             href="#how"
@@ -117,11 +128,11 @@ export default function Landing() {
             The problem
           </p>
           <h2 className="mt-3 text-3xl font-bold tracking-tight text-gray-900 sm:text-4xl">
-            One late part can cost millions — and nobody finds out in time.
+            One late part can cost millions, and nobody finds out in time.
           </h2>
           <p className="mt-5 text-lg leading-relaxed text-gray-600">
             Logistics coordinators make dozens of manual check-in calls a day, yet
-            the signal that matters — “this load is going to be late” — usually
+            the signal that matters, “this load is going to be late”, usually
             arrives too late to act on. When an inbound part misses its dock
             appointment, the assembly line stalls at up to{" "}
             <span className="font-semibold text-gray-900">$1.8M per hour</span>.
@@ -144,17 +155,17 @@ export default function Landing() {
             <Step
               n="1"
               title="Connect your load tenders"
-              body="Inbound loads, carriers, dock appointments, and production-line dependencies flow into FreightVoice — no new system to learn."
+              body="Inbound loads, carriers, dock appointments, and production-line dependencies flow into FreightVoice with no new system to learn."
             />
             <Step
               n="2"
               title="The AI agent places the outbound call"
-              body="FreightVoice dials the driver, confirms ETA and location, verifies the load is sealed and temperature-controlled, and assigns a dock and gate — in natural conversation."
+              body="FreightVoice dials the driver, confirms ETA and location, verifies the load is sealed and temperature-controlled, and assigns a dock and gate in natural conversation."
             />
             <Step
               n="3"
               title="You handle only exceptions"
-              body="Every call is scored for delivery risk. The team reviews a live dashboard and is alerted before a line goes down — instead of dialing all day."
+              body="Every call is scored for delivery risk. The team reviews a live dashboard and is alerted before a line goes down, instead of dialing all day."
             />
           </div>
         </div>
@@ -177,7 +188,7 @@ export default function Landing() {
           />
           <Feature
             title="Production-line protection"
-            body="Scores delivery risk on each load from driver sentiment, ETA, weather, and lane history — and alerts logistics before the line stops."
+            body="Scores delivery risk on each load from driver sentiment, ETA, weather, and lane history, and alerts logistics before the line stops."
           />
           <Feature
             title="Supplier compliance calls"
@@ -226,19 +237,19 @@ export default function Landing() {
           <div className="mt-10">
             <Faq
               q="Are these inbound or outbound calls?"
-              a="Outbound. The AI agent places the calls to your carriers, drivers, and suppliers — they never have to call you. (The 'inbound' in inbound logistics refers to the freight arriving at your plant, not the call direction.)"
+              a="Outbound. The AI agent places the calls to your carriers, drivers, and suppliers so they never have to call you. (The 'inbound' in inbound logistics refers to the freight arriving at your plant, not the call direction.)"
             />
             <Faq
               q="Does the AI actually place real phone calls?"
-              a="Yes. FreightVoice dials carriers and drivers over Twilio, holds a natural spoken conversation, and records the outcome — ETA, cargo condition, dock assignment, and a risk score — back to your dashboard."
+              a="Yes. FreightVoice dials carriers and drivers over Twilio, holds a natural spoken conversation, and records the outcome (ETA, cargo condition, dock assignment, and a risk score) back to your dashboard."
             />
             <Faq
               q="How is delivery risk scored?"
-              a="A weighted model combines the driver's voice sentiment, ETA versus the dock appointment, lane on-time history, route weather, and how vague the ETA was — producing a 0–100 score and a Monitor / Warning / Critical level per load."
+              a="A weighted model combines the driver's voice sentiment, ETA versus the dock appointment, lane on-time history, route weather, and how vague the ETA was, producing a 0 to 100 score and a Monitor / Warning / Critical level per load."
             />
             <Faq
               q="What happens when a load is high-risk?"
-              a="FreightVoice alerts your logistics team with a recommended action (source a backup carrier, pre-stage stock, adjust the schedule) — it never alarms the driver. Routine on-time arrivals are handled silently."
+              a="FreightVoice alerts your logistics team with a recommended action (source a backup carrier, pre-stage stock, adjust the schedule) without alarming the driver. Routine on-time arrivals are handled silently."
             />
             <Faq
               q="Can it handle suppliers in other languages?"
@@ -276,7 +287,7 @@ export default function Landing() {
             <div className="flex h-6 w-6 items-center justify-center rounded bg-gray-900 text-[11px] font-bold text-white">
               FV
             </div>
-            <span>FreightVoice — predictive inbound logistics</span>
+            <span>FreightVoice: predictive inbound logistics</span>
           </div>
           <div className="flex items-center gap-6">
             <a href="#problem" className="hover:text-gray-700">Problem</a>

@@ -23,6 +23,8 @@ function Kpi({ label, value, sub }) {
   );
 }
 
+const API = import.meta.env.VITE_API_URL ?? "";
+
 export default function Dashboard() {
   const [fleet, setFleet] = useState(null);
   const [records, setRecords] = useState(null);
@@ -37,11 +39,11 @@ export default function Dashboard() {
   const refresh = useCallback(async () => {
     try {
       const [f, r] = await Promise.all([
-        fetch("/api/fleet").then((res) => {
+        fetch(`${API}/api/fleet`).then((res) => {
           if (!res.ok) throw new Error(`fleet ${res.status}`);
           return res.json();
         }),
-        fetch("/api/records").then((res) => (res.ok ? res.json() : { records: [] })),
+        fetch(`${API}/api/records`).then((res) => (res.ok ? res.json() : { records: [] })),
       ]);
       setFleet(f);
       setRecords(r);
@@ -62,7 +64,7 @@ export default function Dashboard() {
   const handleCall = useCallback(async (shipment) => {
     setCallingId(shipment.load_id);
     try {
-      await fetch("/api/calls/trigger", {
+      await fetch(`${API}/api/calls/trigger`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ load_id: shipment.load_id, scenario: "carrier" }),

@@ -65,10 +65,34 @@ function LiveDetail({ live, colSpan }) {
 
 const COLUMNS = ["Load", "Carrier", "Commodity", "Lane", "Appt", "Risk", "Status", ""];
 
+function HackathonToast({ pos }) {
+  if (!pos) return null;
+  return (
+    <div
+      className="pointer-events-none fixed z-[9999]"
+      style={{ left: pos.x, top: pos.y, transform: "translateY(-100%)" }}
+    >
+      <div className="max-w-[min(220px,calc(100vw-1rem))] rounded-lg border border-orange-200 bg-orange-50 px-3 py-2 text-xs leading-relaxed text-orange-800 shadow-lg">
+        <span className="font-semibold">Nemotron models</span> were live during the hackathon — now disabled
+      </div>
+      {/* arrow pointing down on the right side toward the button */}
+      <div className="absolute right-3 top-full border-4 border-transparent border-t-orange-200" />
+    </div>
+  );
+}
+
 export default function LoadsTable({ shipments, onCall, callingId }) {
   const [open, setOpen] = useState(null);
+  const [toastPos, setToastPos] = useState(null);
+
+  const handleMouseEnter = (e) => {
+    const rect = e.currentTarget.getBoundingClientRect();
+    setToastPos({ x: rect.left, y: rect.top - 10 });
+  };
 
   return (
+    <>
+    <HackathonToast pos={toastPos} />
     <div className="overflow-x-auto rounded-lg border border-gray-200 bg-white">
       <table className="min-w-full divide-y divide-gray-200 text-sm">
         <thead className="bg-gray-50">
@@ -119,6 +143,8 @@ export default function LoadsTable({ shipments, onCall, callingId }) {
                       <button
                         onClick={() => onCall(s)}
                         disabled={callingId === s.load_id}
+                        onMouseEnter={handleMouseEnter}
+                        onMouseLeave={() => setToastPos(null)}
                         className="rounded-md border border-gray-300 bg-white px-3 py-1 text-xs font-semibold text-gray-800 hover:bg-gray-900 hover:text-white disabled:opacity-40"
                         title="Place an outbound AI call to this carrier"
                       >
@@ -136,5 +162,6 @@ export default function LoadsTable({ shipments, onCall, callingId }) {
         </tbody>
       </table>
     </div>
+    </>
   );
 }

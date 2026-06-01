@@ -18,6 +18,7 @@ All steps are best-effort and never raise into the pipeline teardown path.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 from datetime import datetime
@@ -71,6 +72,50 @@ def transcript_from_context(messages: list[dict], *, drop_first_user: bool = Tru
                     )
         # role == "tool" (results) and "system" are intentionally skipped.
     return out
+
+async def _trigger_cekura_improve() -> None:
+    """Background: ask Cekura to improve the carrier prompt from recent calls.
+
+    Runs the sync improve_prompt_from_calls in a thread (it can take up to 3 min),
+    then validates and saves the result so the next call uses the improved prompt.
+    No-op if Cekura is not configured or the improved prompt fails validation.
+    """
+    if not cekura_client.is_configured() or not cekura_client.agent_id():
+        return
+
+    import prompt_store
+
+    current = prompt_store.load_template()
+    try:
+        result = await asyncio.to_thread(
+            cekura_client.improve_prompt_from_calls,
+            prompt=current,
+            call_logs=5,
+        )
+    except Exception as exc:
+        logger.warning(f"Cekura self-improve: improve_prompt request failed: {exc}")
+        return
+
+    improved = (
+        result.get("improved_prompt")
+        or result.get("prompt")
+        or result.get("suggested_prompt")
+    )
+    if not improved:
+        logger.info("Cekura self-improve: no improved prompt in Cekura response")
+        return
+
+    ok, reason = prompt_store.validate(improved)
+    if not ok:
+        logger.warning(f"Cekura self-improve: candidate invalid ({reason}) — discarding")
+        return
+
+    saved, why = prompt_store.save_template(improved)
+    if saved:
+        logger.info("Cekura self-improve: applied improved prompt (active on next call)")
+    else:
+        logger.warning(f"Cekura self-improve: could not save improved prompt: {why}")
+
 
 # Guards against double-finalize (end_call tool AND on_client_disconnected both
 # firing for the same call). Process-local; fine for a single bot worker.
@@ -151,6 +196,8 @@ async def finalize_call(
             voice_recording_url=recording_url,
             metadata=metadata,
         )
+        # Kick off self-improvement in background — non-blocking, safe to ignore.
+        asyncio.create_task(_trigger_cekura_improve())
     else:
         logger.info(f"finalize_call: {call_id} had no transcript turns — skipping Cekura observe")
 
